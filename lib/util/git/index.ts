@@ -232,9 +232,9 @@ type Submodule = {
   url: string;
 };
 
-async function getSubmodules(): Promise<Submodule[]> {
+async function getSubmodules(repoPath = '.'): Promise<Submodule[]> {
   try {
-    const gitmodulesPath = '.gitmodules';
+    const gitmodulesPath = join(repoPath, '.gitmodules');
     if (!(await fs.exists(join(config.localDir, gitmodulesPath)))) {
       return [];
     }
@@ -278,6 +278,46 @@ export function getHttpUrl(url: string, token?: string): string {
   const parsedUrl = GitUrlParse(url);
   parsedUrl.token = token;
   return parsedUrl.toString('https');
+}
+
+async function cloneSubmodules(repoPath = '.'): Promise<void> {
+  const submodules = await getSubmodules(repoPath);
+  for (const submodule of submodules) {
+    const fullSubmodulePath = join(repoPath, submodule.path);
+    try {
+      logger.debug(`Cloning git submodule at ${fullSubmodulePath}`);
+      // Start inside given repository path
+      const extraConfig = ['-C', repoPath];
+      const parsedUrl = GitUrlParse(submodule.url);
+      // Don't rewrite file URLs
+      if (parsedUrl.protocol !== 'file') {
+        // hostRules only understands HTTP URLs
+        // Find HTTP URL, then apply token
+        let httpSubmoduleUrl = parsedUrl.toString('https');
+        const hostRule = hostRules.find({ url: httpSubmoduleUrl });
+        httpSubmoduleUrl = getHttpUrl(submodule.url, hostRule?.token);
+        // Rewrite submodule URL to HTTP URL with token
+        extraConfig.push(
+          '-c',
+          `url.${httpSubmoduleUrl}.insteadOf=${submodule.url}`
+        );
+      }
+      await git.raw([
+        ...extraConfig,
+        'submodule',
+        'update',
+        '--init',
+        submodule.path,
+      ]);
+      // Recursively clone submodules
+      await cloneSubmodules(fullSubmodulePath);
+    } catch (err) {
+      logger.warn(
+        { err },
+        `Unable to initialise git submodule at ${fullSubmodulePath}`
+      );
+    }
+  }
 }
 
 export async function syncGit(): Promise<void> {
@@ -336,39 +376,7 @@ export async function syncGit(): Promise<void> {
   }
   config.currentBranchSha = (await git.raw(['rev-parse', 'HEAD'])).trim();
   if (config.cloneSubmodules) {
-    const submodules = await getSubmodules();
-    for (const submodule of submodules) {
-      try {
-        logger.debug(`Cloning git submodule at ${submodule.path}`);
-        const extraConfig: string[] = [];
-        const parsedUrl = GitUrlParse(submodule.url);
-        // Don't rewrite file URLs
-        if (parsedUrl.protocol !== 'file') {
-          // hostRules only understands HTTP URLs
-          // Find HTTP URL, then apply token
-          let httpSubmoduleUrl = parsedUrl.toString('https');
-          const hostRule = hostRules.find({ url: httpSubmoduleUrl });
-          httpSubmoduleUrl = getHttpUrl(submodule.url, hostRule?.token);
-          // Rewrite submodule URL to HTTP URL with token
-          extraConfig.push(
-            '-c',
-            `url.${httpSubmoduleUrl}.insteadOf=${submodule.url}`
-          );
-        }
-        await git.raw([
-          ...extraConfig,
-          'submodule',
-          'update',
-          '--init',
-          submodule.path,
-        ]);
-      } catch (err) {
-        logger.warn(
-          { err },
-          `Unable to initialise git submodule at ${submodule.path}`
-        );
-      }
-    }
+    await cloneSubmodules();
   }
   try {
     const latestCommit = (await git.log({ n: 1 })).latest;
