@@ -21,6 +21,7 @@ import { logger } from '../../logger';
 import { ExternalHostError } from '../../types/errors/external-host-error';
 import { GitOptions, GitProtocol } from '../../types/git';
 import { Limit, incLimitedValue } from '../../workers/global/limits';
+import * as hostRules from '../host-rules';
 import { configSigningKey, writePrivateKey } from './private-key';
 
 export * from './private-key';
@@ -226,24 +227,57 @@ export async function setUserRepoConfig({
   config.ignoredAuthors = gitIgnoredAuthors ?? [];
 }
 
-export async function getSubmodules(): Promise<string[]> {
+type Submodule = {
+  path: string;
+  url: string;
+};
+
+async function getSubmodules(): Promise<Submodule[]> {
   try {
-    return (
-      (await git.raw([
-        'config',
-        '--file',
-        '.gitmodules',
-        '--get-regexp',
-        'path',
-      ])) || ''
-    )
+    const gitmodulesPath = '.gitmodules';
+    if (!(await fs.exists(join(config.localDir, gitmodulesPath)))) {
+      return [];
+    }
+    const text = await git.raw([
+      'config',
+      '--file',
+      gitmodulesPath,
+      '--list',
+      '--null',
+    ]);
+    const entries: [string, string][] = text
       .trim()
-      .split(/[\n\s]/)
-      .filter((_e: string, i: number) => i % 2);
+      .split('\0')
+      .flatMap((entry) => {
+        const pair = entry.split(/\r?\n/);
+        return pair.length === 2 ? [[pair[0], pair[1]]] : [];
+      });
+    const variables = new Map(entries);
+    const submodules: Submodule[] = [];
+    for (const [key, value] of variables.entries()) {
+      // collect submodule path/url variable pairs
+      const match = /^submodule\.(.*)\.path$/.exec(key);
+      if (match !== null) {
+        const url = variables.get(`submodule.${match[1]}.url`);
+        if (url !== undefined) {
+          submodules.push({
+            path: value,
+            url,
+          });
+        }
+      }
+    }
+    return submodules;
   } catch (err) /* istanbul ignore next */ {
     logger.warn({ err }, 'Error getting submodules');
     return [];
   }
+}
+
+export function getHttpUrl(url: string, token?: string): string {
+  const parsedUrl = GitUrlParse(url);
+  parsedUrl.token = token;
+  return parsedUrl.toString('https');
 }
 
 export async function syncGit(): Promise<void> {
@@ -305,12 +339,33 @@ export async function syncGit(): Promise<void> {
     const submodules = await getSubmodules();
     for (const submodule of submodules) {
       try {
-        logger.debug(`Cloning git submodule at ${submodule}`);
-        await git.submoduleUpdate(['--init', submodule]);
+        logger.debug(`Cloning git submodule at ${submodule.path}`);
+        const extraConfig: string[] = [];
+        const parsedUrl = GitUrlParse(submodule.url);
+        // Don't rewrite file URLs
+        if (parsedUrl.protocol !== 'file') {
+          // hostRules only understands HTTP URLs
+          // Find HTTP URL, then apply token
+          let httpSubmoduleUrl = parsedUrl.toString('https');
+          const hostRule = hostRules.find({ url: httpSubmoduleUrl });
+          httpSubmoduleUrl = getHttpUrl(submodule.url, hostRule?.token);
+          // Rewrite submodule URL to HTTP URL with token
+          extraConfig.push(
+            '-c',
+            `url.${httpSubmoduleUrl}.insteadOf=${submodule.url}`
+          );
+        }
+        await git.raw([
+          ...extraConfig,
+          'submodule',
+          'update',
+          '--init',
+          submodule.path,
+        ]);
       } catch (err) {
         logger.warn(
           { err },
-          `Unable to initialise git submodule at ${submodule}`
+          `Unable to initialise git submodule at ${submodule.path}`
         );
       }
     }
@@ -439,7 +494,9 @@ export async function getFileList(): Promise<string[]> {
     .filter((line) => line.startsWith('100'))
     .map((line) => line.split(/\t/).pop())
     .filter((file: string) =>
-      submodules.every((submodule: string) => !file.startsWith(submodule))
+      submodules.every(
+        (submodule: Submodule) => !file.startsWith(submodule.path)
+      )
     );
 }
 
@@ -746,10 +803,4 @@ export function getUrl({
     host,
     pathname: repository + '.git',
   });
-}
-
-export function getHttpUrl(url: string, token?: string): string {
-  const parsedUrl = GitUrlParse(url);
-  parsedUrl.token = token;
-  return parsedUrl.toString('https');
 }
