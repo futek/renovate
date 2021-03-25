@@ -280,7 +280,7 @@ export function getHttpUrl(url: string, token?: string): string {
   return parsedUrl.toString('https');
 }
 
-async function cloneSubmodules(repoPath = '.'): Promise<void> {
+export async function cloneSubmodules(repoPath = '.'): Promise<void> {
   const submodules = await getSubmodules(repoPath);
   for (const submodule of submodules) {
     const fullSubmodulePath = join(repoPath, submodule.path);

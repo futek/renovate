@@ -25,6 +25,7 @@ import { exec } from '../../util/exec';
 import { readLocalFile, writeLocalFile } from '../../util/fs';
 import {
   checkoutBranch,
+  cloneSubmodules,
   deleteBranch,
   getBranchCommit,
   getRepoStatus,
@@ -377,17 +378,23 @@ export async function processBranch(
 
         if (is.nonEmptyArray(commands)) {
           // Persist updated files in file system so any executed commands can see them
-          for (const file of config.updatedPackageFiles.concat(
-            config.updatedArtifacts
-          )) {
-            if (file.name !== '|delete|') {
-              let contents;
-              if (typeof file.contents === 'string') {
-                contents = Buffer.from(file.contents);
-              } else {
-                contents = file.contents;
+          if (upgrade.manager === 'git-submodules') {
+            for (const submodule of config.updatedArtifacts) {
+              await cloneSubmodules(submodule.name);
+            }
+          } else {
+            for (const file of config.updatedPackageFiles.concat(
+              config.updatedArtifacts
+            )) {
+              if (file.name !== '|delete|') {
+                let contents;
+                if (typeof file.contents === 'string') {
+                  contents = Buffer.from(file.contents);
+                } else {
+                  contents = file.contents;
+                }
+                await writeLocalFile(file.name, contents);
               }
-              await writeLocalFile(file.name, contents);
             }
           }
 
